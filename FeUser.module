@@ -1,0 +1,335 @@
+<?php namespace ProcessWire;
+
+/**
+*
+* FeUser
+*
+* See README.md for usage instructions.
+*
+* @author Tabea David <td@kf-interactive.com>
+* @version 0.0.1
+* @copyright Copyright (c) 2017
+* @see https://github.com/justonestep/processwire-feuser
+* @see http://www.processwire.com
+*/
+
+/**
+ * Class FeUser
+ */
+class FeUser extends Process implements Module {
+
+  /**
+   * Retrieves module meta data
+   * Implementation of the Module interface
+   *
+   * @return array
+   * @see http://processwire.com/apigen/class-Module.html
+   */
+  public static function getModuleInfo() {
+    return array(
+      'title' => 'FE User Handling',
+      'summary' => 'Basic FE User Handling e.g. Login, Register, Password Forgot, Logout.',
+      'version' => 001,
+      'href' => 'https://github.com/justonestep/processwire-feuser',
+      'icon' => 'user',
+      'permission' => 'page-view',
+    );
+  }
+
+  const STATUS_STARTED = 'started'; // start registration process
+  const STATUS_INVALID = 'invalid'; // form validation error
+  const STATUS_REQUESTED = 'requested'; // confirmation requested
+  const STATUS_CANCELLED = 'cancelled'; // no user was found
+  const STATUS_EXPIRED = 'expired'; // token expired
+  const STATUS_CONFIRMED = 'confirmed'; // success, registration finished
+
+  public function ___login($redirectTo = null) {
+    $this->redirectUserIfIsLoggedin($redirectTo);
+
+    $loginInput = $this->input->post->user;
+    $pass = $this->input->post->pass;
+
+    // check for login before outputting markup
+    if ($loginInput && $pass) {
+      // check whether login is email address
+      $email = $this->sanitizer->email($loginInput);
+
+      // otherwise use username
+      if (!$email) {
+        $username = $this->sanitizer->username($loginInput);
+      } else {
+        // get username
+        $user = $this->users->get("email=$email");
+        $username = $user->id ? $user->name : '';
+      }
+
+      // user must renew pass (checkbox force_pass_renew is checked)
+      if ($user && $user->force_pass_renew === 1) {
+        $this->session->redirect($this->pages->get('/')->url . '?forgot=1&force=1');
+      }
+
+      if ($this->session->login($username, $pass)) {
+        // login successful
+        $this->session->redirect($this->getRedirectTo($redirectTo));
+      }
+    }
+  }
+
+  public function ___logout($redirectTo = null) {
+    $this->session->logout();
+    $this->session->redirect($this->getRedirectTo($redirectTo, false));
+  }
+
+  public function ___register($redirectTo = null) {
+    $response = (object) array('out' => '', 'status' => self::STATUS_STARTED);
+
+    $this->redirectUserIfIsLoggedin($redirectTo);
+    $this->validateToken($response);
+
+    if ($this->input->post->user || $this->input->post->pass) {
+      $email = $this->sanitizer->email($this->input->post->user);
+      $pass = $this->input->post->pass;
+      $minlength = $this->fields->get('pass')->minlength;
+
+      if (!$email) {
+        $response->out = __('Invalid email address.');
+        $response->status = self::STATUS_INVALID;
+      } elseif (!$pass) {
+        $response->out = __('Password is required.');
+        $response->status = self::STATUS_INVALID;
+      } elseif (strlen($pass) < $minlength) {
+        $response->out = sprintf(__('Password minimum length is %s.'), $minlength);
+        $response->status = self::STATUS_INVALID;
+      } else {
+        // email unique
+        $unique = $this->users->find("email=$email,status=" . Page::statusOn);
+
+        if ($unique->count) {
+          $response->out = __('This email address is already registered.');
+          $response->status = self::STATUS_INVALID;
+        } else {
+          $overwrite = $this->users->find("email={$email}");
+          $u = $overwrite->count ? $overwrite->first() : new User();
+
+          $u->of(false);
+          $u->name = $email;
+          $u->email = $email;
+          $u->pass = $pass;
+          $u->_pass = $pass;
+          $u->language = $this->user->language;
+          $u->addRole($this->userRole);
+          $u->status = Page::statusHidden;
+          $u->save();
+
+          $token = sha1($u->email . $u->id . $this->config->userAuthSalt);
+          $this->sendValidationMail($token, $u);
+
+          $out = __('Congratulations, your registration request has been processed successfully! Please check your email for further instructions.');
+          $response->out = html_entity_decode($out, ENT_QUOTES, 'UTF-8');
+          $response->status = self::STATUS_REQUESTED;
+        }
+      }
+    }
+
+    return $response;
+  }
+
+  public function ___forgotPassword() {
+    return $this->modules->get('ProcessForgotPassword')->execute();
+  }
+
+  public function init() {
+    $this->addHookAfter('Password::setPass', $this, 'passwordChanged');
+  }
+
+  public function passwordChanged(HookEvent $event) {
+    $id = (int)$this->input->get->user_id;
+    if (!$id) return;
+
+    $user = $this->users->get($id);
+    if (!$user->id) return;
+
+    if ($user->isChanged('pass')){
+      $user->of(false);
+      $user->force_pass_renew = 0; // uncheck once password has been changed
+      $user->save();
+    }
+  }
+
+  /**
+   * Send validation mail
+   *
+   * @param string $token
+   * @param User $u
+   * @param string action
+   */
+  private function sendValidationMail($token, $u) {
+    $link = $this->page->httpUrl . "?t={$token}";
+
+    $wireMail = wireMail();
+    $wireMail->to = $u->email;
+
+    list($fromEmail, $fromName) = $this->extractEmailAndName($this->mailfrom);
+    $wireMail->from = "$fromName <$fromEmail>";
+    $wireMail->subject($this->_('New Registration'));
+    $message = $this->getMessageContent($link, $u);
+    $wireMail->body(trim($message));
+    $numSent = $wireMail->send();
+
+    if (!$numSent) {
+      $this->log->save('errors', "Email could not been sent to `{$u->email}`.");
+    } else {
+      $this->log->save('messages', "Email has been sent successfully to `{$u->email}`.");
+    }
+  }
+
+  /**
+   * Get message content, substitute variables
+   *
+   * @param string $link
+   * @param User $user
+   * @return string
+   */
+  private function getMessageContent($link, $user) {
+    $text = $this->messageRegister;
+
+    if (preg_match('/\%link\%/', $text)) $text = str_replace('%link%', $link, $text);
+    preg_match_all('/\%(.*?)\%/', $text, $matches);
+
+    if (isset($user)) {
+      foreach ($matches[0] as $key => $match) {
+        $text = str_replace($match, $user->{$matches[1][$key]}, $text);
+      }
+    }
+
+    return $text;
+  }
+
+  /**
+   * extract email from name
+   * substitute umlaute
+   *
+   * @param string $email
+   * @return array
+   */
+  private function extractEmailAndName($email) {
+    $name = '';
+    if (strpos($email, '<') !== false && strpos($email, '>') !== false) {
+      // email has separate from name and email
+      if (preg_match('/^(.*?)<([^>]+)>.*$/', $email, $matches)) {
+        $name = preg_replace(
+          array('/ä/', '/ö/', '/ü/', '/Ä/', '/Ö/', '/Ü/','/ß/'),
+          array('ae', 'oe', 'ue', 'Ae', 'Oe', 'Ue', 'ss'),
+          $matches[1]
+        );
+        $email = $matches[2];
+      }
+    }
+
+    return array($email, $name);
+  }
+
+  private function validateToken(&$response) {
+    if ($this->sanitizer->text($this->input->get->t)) {
+      // enable user
+      if ($user = $this->getAndValidateUser($response, Page::statusHidden)) {
+        $user->set('status', Page::statusOn);
+        $user->save();
+
+        $this->log->save('messages', "User has been successfully confirmed with email `{$user->email}`.");
+
+        $response->out .= html_entity_decode($this->_('Thank you for your registration.'), ENT_QUOTES, 'UTF-8');
+        $response->status = self::STATUS_CONFIRMED;
+      }
+    }
+  }
+
+  /**
+   * Get and validate user
+   *
+   * @param object $response
+   * @param integer $status
+   * @return User
+   */
+  private function getAndValidateUser(&$response, $status) {
+    $result = $this->getUserByToken();
+
+    // no user/page was found
+    if (!$result->num_rows) {
+      $response->out .= html_entity_decode($this->_("Unfortunately there's no such user in the database."), ENT_QUOTES, 'UTF-8');
+      $response->status = self::STATUS_CANCELLED;
+      return false;
+    }
+
+    list ($id, $email, $modified) = $result->fetch_row();
+    $user = $this->users->get($id);
+
+    // page is not hidden / user has not role `newsletter`
+    if (!$user || $user->status !== $status || !$user->hasRole($this->userRole)) {
+      $response->out .= html_entity_decode($this->_("Unfortunately there's no such user in the database."), ENT_QUOTES, 'UTF-8');
+      $response->status = self::STATUS_CANCELLED;
+      return false;
+    }
+
+    // only if action equals subscribe: validate created + time x
+    // compare today and created + valid duration time
+    if ($status !== Page::statusOn) {
+      $createdDate = new \DateTime($modified);
+      $period = "P{$this->periodOfValidity}D";
+      $createdDate->add(new \DateInterval($period));
+      $today = new \DateTime();
+      if ($today > $createdDate) {
+        $response->out .= $this->_('Unfortunately this confirmation token has expired.');
+        $response->status = self::STATUS_EXPIRED;
+        return false;
+      }
+    }
+
+    return $user;
+  }
+
+  /**
+   * Get user by token
+   */
+  private function getUserByToken() {
+    $token = $this->db->escapeStr($this->input->get->t);
+    $userAuthSalt = $this->db->escapeStr($this->config->userAuthSalt);
+
+    $role = $this->roles->get($this->userRole);
+
+    $select = 'p.id, e.data AS email, p.modified FROM pages AS p';
+    $joinEmail = 'field_email e ON (p.id = e.pages_id)';
+    $joinRole = 'field_roles r ON (p.id = r.pages_id)';
+    $where = "r.data = '{$role->id}'";
+
+    $addWhere = "sha1(CONCAT(e.data, p.id, '$userAuthSalt')) = '$token'";
+    $addWhere .= ' && p.status = ' . Page::statusHidden;
+
+    return $this->db->query("SELECT $select LEFT JOIN $joinEmail LEFT JOIN $joinRole WHERE $where && $addWhere");
+  }
+
+  private function getRedirectTo($redirectTo = null, $isLogin = true) {
+    // overwrite module settings
+    if (!is_null($redirectTo)) {
+      $select = is_numeric($redirectTo) ? (int)$redirectTo : $redirectTo;
+    } else {
+      // get from module settings
+      $select = $isLogin ? $this->redirectAfterLogin : $this->redirectAfterLogout;
+    }
+
+    // get page
+    $redirectToPage = $this->pages->findOne($select);
+
+    // no page found: fallback to homepage
+    if ($redirectToPage instanceof NullPage) {
+      $redirectToPage = $this->pages->findOne('/');
+    }
+
+    return $redirectToPage->url;
+  }
+
+  private function redirectUserIfIsLoggedin($redirectTo = null) {
+    if ($this->user->isLoggedin()) $this->session->redirect($this->getRedirectTo($redirectTo));
+  }
+
+}

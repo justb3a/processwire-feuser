@@ -13,6 +13,7 @@ class FeUserConfig extends ModuleConfig {
       'redirectAfterLogin' => null,
       'redirectAfterLogout' => null,
       'userRole' => array(),
+      'profileFields' => array(),
       'mailfrom' => 'noreply@server.com',
       'messageRegister' => "Please click the following link to confirm your registration: %link%",
       'periodOfValidity' => 5,
@@ -63,6 +64,14 @@ class FeUserConfig extends ModuleConfig {
     $field->columnWidth = 50;
     $field->required = true;
     foreach ($this->getAvailableRoles() as $role) $field->addOption($role, $role);
+    $inputfields->add($field);
+
+    $field = $this->modules->get('InputfieldAsmSelect');
+    $field->label = __('Profile Fields');
+    $field->attr('name', 'profileFields');
+    $field->columnWidth = 50;
+    $field->required = true;
+    foreach ($this->fields as $f) $field->addOption($f->name, $f->name);
     $inputfields->add($field);
 
     $field = $this->modules->get('InputfieldText');

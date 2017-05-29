@@ -7,7 +7,7 @@
 * See README.md for usage instructions.
 *
 * @author Tabea David <td@kf-interactive.com>
-* @version 0.0.1
+* @version 0.0.2
 * @copyright Copyright (c) 2017
 * @see https://github.com/justonestep/processwire-feuser
 * @see http://www.processwire.com
@@ -29,7 +29,7 @@ class FeUser extends Process implements Module {
     return array(
       'title' => 'FE User Handling',
       'summary' => 'Basic FE User Handling e.g. Login, Register, Password Forgot, Logout.',
-      'version' => 001,
+      'version' => 002,
       'href' => 'https://github.com/justonestep/processwire-feuser',
       'icon' => 'user',
       'permission' => 'page-view',
@@ -57,6 +57,7 @@ class FeUser extends Process implements Module {
       // otherwise use username
       if (!$email) {
         $username = $this->sanitizer->username($loginInput);
+        $user = $this->users->get("name=$username");
       } else {
         // get username
         $user = $this->users->get("email=$email");
@@ -142,6 +143,68 @@ class FeUser extends Process implements Module {
     $this->addHookAfter('Password::setPass', $this, 'passwordChanged');
   }
 
+  public function ___getProfileForm() {
+    $form = $this->modules->get('InputfieldForm');
+    $form->action = './';
+    $form->method = 'post';
+    $form->class = 'form__profile';
+    $form->attr('id+name','contact-form');
+
+    // add fields
+    foreach ($this->profileFields as $fieldname) {
+      if ($field = $this->fields->get($fieldname)) {
+        $inputfield = $field->getInputfield($this->page);
+        if ($val = $this->user->$fieldname) $inputfield->value = $val;
+        $form->append($inputfield);
+      }
+    }
+
+    // add username
+    $field = $this->modules->get('InputfieldText');
+    $field->attr('id+name', 'username');
+    $field->label = $this->_('Username');
+    $field->value = $this->user->name;
+    $field->required = true;
+    $form->append($field);
+
+    // add pass
+    $field = $this->modules->get('InputfieldPassword');
+    $field->attr('id+name', 'pass1');
+    $field->attr('minlength', 1); // doesn't matter, just compare with current pass
+    $field->set('requirements', array(InputfieldPassword::requireLetter));
+    $field->label = $this->_('Password');
+    $form->append($field);
+
+    $field = $this->modules->get('InputfieldPassword');
+    $field->attr('id+name', 'pass2');
+    $field->set('requirements', array(InputfieldPassword::requireLetter));
+    $field->label = $this->_('New Password');
+    $field->description = $this->_('Confirm new Password');
+    $form->append($field);
+
+    $submit = $this->modules->get('InputfieldSubmit');
+    $submit->attr('id+name', 'save');
+    $submit->attr('class', 'button');
+    $submit->attr('value', $this->_('Save'));
+    $form->append($submit);
+
+    // on form submit
+    if ($this->input->post->save) {
+      // process form input and validate fields
+      $this->input->post->_pass1 = $this->input->post->pass1;
+      $form->processInput($this->input->post);
+      $changed = $this->processValidation($form);
+
+      if (!$form->getErrors()) {
+        // save user
+        $this->saveUser($form, $changed);
+        $this->session->message($this->_('Your profile information has been saved successfully.'));
+      }
+    }
+
+    return $form;
+  }
+
   public function passwordChanged(HookEvent $event) {
     $id = (int)$this->input->get->user_id;
     if (!$id) return;
@@ -154,6 +217,69 @@ class FeUser extends Process implements Module {
       $user->force_pass_renew = 0; // uncheck once password has been changed
       $user->save();
     }
+  }
+
+  private function saveUser($form, $changed) {
+    $this->user->of(false); // turns off output formatting
+
+    if ($changed['username']) $this->user->name = $form->get('username')->value;
+    if ($changed['pass']) {
+      $this->user->pass = $this->input->post->pass2;
+    }
+
+    foreach ($this->profileFields as $f) {
+      if ($f === 'email') continue;
+      $this->user->$f = $form->get($f)->value;
+    }
+
+    $this->user->save();
+  }
+
+  /**
+   * Hookable method called after the form was processed
+   * Allows custom/extra validation and field manipulation
+   */
+  protected function ___processValidation($form) {
+    $changed = array('username' => false, 'pass' => false);
+
+    // compare username
+    $newUsername = $this->sanitizer->pageName($form->get('username')->value);
+    $oldUsername = $this->user->name;
+
+    if ($newUsername !== $oldUsername) {
+      // check for uniquness
+      $unique = $this->users->count("name=$newUsername");
+      if ($unique > 0) {
+        // add error
+        $form->get('username')->error(__('This username is already taken, please choose another one.'));
+      } else {
+        $changed['username'] = true;
+      }
+    }
+
+    // check if they submitted a password change
+    $passOld = $this->input->post->pass1;
+    $passNew = $this->input->post->pass2;
+    $passConfirm = $this->input->post->_pass2;
+
+    // all three inputs have to be filled
+    if ($passOld && $passNew && $passConfirm) {
+
+      // check old password
+      if ($this->user->pass->matches($passOld)) {
+        if (strlen($passNew) < 6) {
+          $form->get('pass2')->error(__('Password must be at least 6 characters long'));
+        } else if ($passNew != $passConfirm) {
+          $form->get('pass2')->error(__('Passwords do not match'));
+        } else {
+          $changed['pass'] = true;
+        }
+      } else {
+        $form->get('pass1')->error(__('Password is not correct'));
+      }
+    }
+
+    return $changed;
   }
 
   /**

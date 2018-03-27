@@ -3,9 +3,9 @@
 - login
 - logout
 - register
-- forgot pass
 - change pass
 - change profile
-- force user to renew pass
+- forgot pass (using username or usermail)
+- force user to renew pass (similar to forgot pass)
 
 **Work in Progress!**

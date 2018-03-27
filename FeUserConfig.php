@@ -12,10 +12,12 @@ class FeUserConfig extends ModuleConfig {
     return array(
       'redirectAfterLogin' => null,
       'redirectAfterLogout' => null,
+      'redirectChangeEmail' => null,
       'userRole' => array(),
       'profileFields' => array(),
       'mailfrom' => 'noreply@server.com',
       'messageRegister' => "Please click the following link to confirm your registration: %link%",
+      'messageChangeEmail' => "Please click the following link to confirm your e-mail address: %link%",
       'periodOfValidity' => 5,
     );
   }
@@ -58,6 +60,12 @@ class FeUserConfig extends ModuleConfig {
     $field->columnWidth = 50;
     $inputfields->add($field);
 
+    $field = $this->modules->get('InputfieldPageListSelect');
+    $field->name = 'redirectChangeEmail';
+    $field->label = __('Page to rediret to after clicking change email link (must be public)');
+    $field->columnWidth = 50;
+    $inputfields->add($field);
+
     $field = $this->modules->get('InputfieldSelect');
     $field->label = __('User Role');
     $field->attr('name', 'userRole');
@@ -84,6 +92,14 @@ class FeUserConfig extends ModuleConfig {
     $field = $this->modules->get('InputfieldTextarea');
     $field->name = 'messageRegister';
     $field->label = __('Register E-Mail Message');
+    $field->description = __('Use %fieldName% as placeholder, for example %email%');
+    $field->rows = 8;
+    $field->columnWidth = 50;
+    $inputfields->add($field);
+
+    $field = $this->modules->get('InputfieldTextarea');
+    $field->name = 'messageChangeEmail';
+    $field->label = __('Change E-Mail Message');
     $field->description = __('Use %fieldName% as placeholder, for example %email%');
     $field->rows = 8;
     $field->columnWidth = 50;

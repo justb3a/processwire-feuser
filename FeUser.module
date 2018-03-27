@@ -7,7 +7,7 @@
 * See README.md for usage instructions.
 *
 * @author Tabea David <td@kf-interactive.com>
-* @version 0.0.2
+* @version 0.0.3
 * @copyright Copyright (c) 2017
 * @see https://github.com/justonestep/processwire-feuser
 * @see http://www.processwire.com
@@ -29,10 +29,11 @@ class FeUser extends Process implements Module {
     return array(
       'title' => 'FE User Handling',
       'summary' => 'Basic FE User Handling e.g. Login, Register, Password Forgot, Logout.',
-      'version' => 002,
+      'version' => 003,
       'href' => 'https://github.com/justonestep/processwire-feuser',
       'icon' => 'user',
       'permission' => 'page-view',
+      'autoload' => true,
     );
   }
 
@@ -42,6 +43,16 @@ class FeUser extends Process implements Module {
   const STATUS_CANCELLED = 'cancelled'; // no user was found
   const STATUS_EXPIRED = 'expired'; // token expired
   const STATUS_CONFIRMED = 'confirmed'; // success, registration finished
+
+  /**
+   * Initialize the module - ready
+   *
+   * ProcessWire calls this when the module is loaded. For 'autoload' modules, this will be called
+   * when ProcessWire's API is ready. As a result, this is a good place to attach hooks.
+   */
+  public function ready() {
+    $this->addHookBefore('ProcessForgotPassword::execute', $this, 'handleMailInput');
+  }
 
   public function ___login($redirectTo = null) {
     $this->redirectUserIfIsLoggedin($redirectTo);
@@ -85,7 +96,7 @@ class FeUser extends Process implements Module {
     $response = (object) array('out' => '', 'status' => self::STATUS_STARTED);
 
     $this->redirectUserIfIsLoggedin($redirectTo);
-    $this->validateToken($response);
+    $this->validateToken($response, Page::statusHidden);
 
     if ($this->input->post->user || $this->input->post->pass) {
       $email = $this->sanitizer->email($this->input->post->user);
@@ -148,7 +159,7 @@ class FeUser extends Process implements Module {
     $form->action = './';
     $form->method = 'post';
     $form->class = 'form__profile';
-    $form->attr('id+name','contact-form');
+    $form->attr('id+name','profile');
 
     // add fields
     foreach ($this->profileFields as $fieldname) {
@@ -205,6 +216,60 @@ class FeUser extends Process implements Module {
     return $form;
   }
 
+  public function ___getProfileFormChangeMail() {
+    $form = $this->modules->get('InputfieldForm');
+    $form->action = './';
+    $form->method = 'post';
+    $form->class = 'form__profile';
+    $form->attr('id+name','change-mail');
+
+    $response = (object) array('out' => '', 'status' => self::STATUS_STARTED);
+    $this->validateToken($response, Page::statusOn);
+    if ($response->status !== self::STATUS_STARTED) {
+      $this->session->message($response->out);
+      if ($response->status === self::STATUS_CONFIRMED) return;
+    }
+
+    // add fields
+    if ($field = $this->fields->get('email_tmp')) {
+      $inputfield = $field->getInputfield($this->page);
+      if ($val = $this->user->email_tmp) $inputfield->value = $val;
+      $inputfield->required = true;
+      $form->append($inputfield);
+    }
+
+    $submit = $this->modules->get('InputfieldSubmit');
+    $submit->attr('id+name', 'send');
+    $submit->attr('class', 'button');
+    $submit->attr('value', $this->_('Send'));
+    $form->append($submit);
+
+    // on form submit
+    if ($this->input->post->send) {
+      // process form input and validate fields
+      $form->processInput($this->input->post);
+
+      // additional email checks
+      $email = $this->sanitizer->email($form->get('email_tmp')->value);
+      if ($email === $this->user->email) {
+        $form->get('email_tmp')->error(__('You have already registered this e-mail address.'));
+      } else if ($this->users->count("email=$email,status=" . Page::statusOn)) {
+        $form->get('email_tmp')->error(__('This e-mail address is already taken, please choose another one.'));
+      }
+
+      if (!$form->getErrors()) {
+        // save email address and send validation mail
+        $this->user->setAndSave(array('email_tmp' => $email));
+        $token = sha1($email . $this->user->id . $this->config->userAuthSalt);
+        $this->sendValidationMail($token, $this->user, $email);
+        $this->session->message($this->_('Your email change request has been processed successfully! Please check your email for further instructions.'));
+        return;
+      }
+    }
+
+    return $form;
+  }
+
   public function passwordChanged(HookEvent $event) {
     $id = (int)$this->input->get->user_id;
     if (!$id) return;
@@ -233,6 +298,29 @@ class FeUser extends Process implements Module {
     }
 
     $this->user->save();
+  }
+
+  /**
+   * Hook ProcessForgotPassword::execute
+   * adapt step1_renderForm input before processing it
+   *
+   * @param HookEvent $event
+   */
+  public function handleMailInput(HookEvent $event) {
+    // step 2
+    if ($this->input->post->username &&
+      $this->input->post->submit_forgot &&
+      $this->session->userResetStep === 1) {
+      // check if username is email address
+      $email = $this->sanitizer->email($this->input->post->username);
+      if ($email) {
+        // get and assign username
+        $user = $this->users->get("email=$email");
+        if ($user && $user->id && $user->email && !$user->isUnpublished()) {
+          $this->input->post->username = $user->name;
+        }
+      }
+    }
   }
 
   /**
@@ -287,18 +375,28 @@ class FeUser extends Process implements Module {
    *
    * @param string $token
    * @param User $u
-   * @param string action
+   * @param string $type
    */
-  private function sendValidationMail($token, $u) {
-    $link = $this->page->httpUrl . "?t={$token}";
+  private function sendValidationMail($token, $u, $mail = null) {
+    if ($mail) {
+      $link = $this->pages->get($this->redirectChangeEmail)->httpUrl . "?t={$token}";
+      $msg = $this->messageChangeEmail;
+      $to = $mail;
+      $subject = $this->_('Confirm e-mail address change');
+    } else {
+      $link = $this->page->httpUrl . "?t={$token}";
+      $msg = $this->messageRegister;
+      $to = $u->email;
+      $subject = $this->_('New Registration');
+    }
+
+    $message = $this->getMessageContent($link, $u, $msg);
+    list($fromEmail, $fromName) = $this->extractEmailAndName($this->mailfrom);
 
     $wireMail = wireMail();
-    $wireMail->to = $u->email;
-
-    list($fromEmail, $fromName) = $this->extractEmailAndName($this->mailfrom);
+    $wireMail->to = $mail ? $mail : $u->email;
+    $wireMail->subject($subject);
     $wireMail->from = "$fromName <$fromEmail>";
-    $wireMail->subject($this->_('New Registration'));
-    $message = $this->getMessageContent($link, $u);
     $wireMail->body(trim($message));
     $numSent = $wireMail->send();
 
@@ -316,9 +414,7 @@ class FeUser extends Process implements Module {
    * @param User $user
    * @return string
    */
-  private function getMessageContent($link, $user) {
-    $text = $this->messageRegister;
-
+  private function getMessageContent($link, $user, $text) {
     if (preg_match('/\%link\%/', $text)) $text = str_replace('%link%', $link, $text);
     preg_match_all('/\%(.*?)\%/', $text, $matches);
 
@@ -355,16 +451,21 @@ class FeUser extends Process implements Module {
     return array($email, $name);
   }
 
-  private function validateToken(&$response) {
+  private function validateToken(&$response, $status) {
     if ($this->sanitizer->text($this->input->get->t)) {
       // enable user
-      if ($user = $this->getAndValidateUser($response, Page::statusHidden)) {
-        $user->set('status', Page::statusOn);
-        $user->save();
+      if ($user = $this->getAndValidateUser($response, $status)) {
+        if ($status == Page::statusOn) {
+          // change email
+          $user->setAndSave(array('email' => $user->email_tmp, 'email_tmp' => ''));
+          $response->out .= html_entity_decode($this->_('Your email address has been changed successfully.'), ENT_QUOTES, 'UTF-8');
+        } else {
+          // register
+          $user->setAndSave(array('status' => Page::statusOn));
+          $response->out .= html_entity_decode($this->_('Thank you for your registration.'), ENT_QUOTES, 'UTF-8');
+        }
 
         $this->log->save('messages', "User has been successfully confirmed with email `{$user->email}`.");
-
-        $response->out .= html_entity_decode($this->_('Thank you for your registration.'), ENT_QUOTES, 'UTF-8');
         $response->status = self::STATUS_CONFIRMED;
       }
     }
@@ -378,22 +479,30 @@ class FeUser extends Process implements Module {
    * @return User
    */
   private function getAndValidateUser(&$response, $status) {
-    $result = $this->getUserByToken();
+    $result = $this->getUserByToken($status);
 
     // no user/page was found
     if (!$result->num_rows) {
-      $response->out .= html_entity_decode($this->_("Unfortunately there's no such user in the database."), ENT_QUOTES, 'UTF-8');
       $response->status = self::STATUS_CANCELLED;
+      if ($status == Page::statusOn) {
+        $response->out .= html_entity_decode($this->_("There's no such user in the database."), ENT_QUOTES, 'UTF-8'); // password change
+      } else {
+        $response->out .= html_entity_decode($this->_("Unfortunately there's no such user in the database."), ENT_QUOTES, 'UTF-8');  // register
+      }
       return false;
     }
 
     list ($id, $email, $modified) = $result->fetch_row();
     $user = $this->users->get($id);
 
-    // page is not hidden / user has not role `newsletter`
+    // user has not correct status and/or role
     if (!$user || $user->status !== $status || !$user->hasRole($this->userRole)) {
-      $response->out .= html_entity_decode($this->_("Unfortunately there's no such user in the database."), ENT_QUOTES, 'UTF-8');
       $response->status = self::STATUS_CANCELLED;
+      if ($status == Page::statusOn) {
+        $response->out .= html_entity_decode($this->_("There's no such user in the database."), ENT_QUOTES, 'UTF-8'); // password change
+      } else {
+        $response->out .= html_entity_decode($this->_("Unfortunately there's no such user in the database."), ENT_QUOTES, 'UTF-8'); // register
+      }
       return false;
     }
 
@@ -405,8 +514,12 @@ class FeUser extends Process implements Module {
       $createdDate->add(new \DateInterval($period));
       $today = new \DateTime();
       if ($today > $createdDate) {
-        $response->out .= $this->_('Unfortunately this confirmation token has expired.');
         $response->status = self::STATUS_EXPIRED;
+        if ($status == Page::statusOn) {
+          $response->out .= $this->_('This confirmation token has expired.'); // password change
+        } else {
+          $response->out .= $this->_('Unfortunately this confirmation token has expired.'); // register
+        }
         return false;
       }
     }
@@ -417,19 +530,19 @@ class FeUser extends Process implements Module {
   /**
    * Get user by token
    */
-  private function getUserByToken() {
+  private function getUserByToken($status) {
+    $emailField = $status === Page::statusOn ? 'email_tmp' : 'email';
     $token = $this->db->escapeStr($this->input->get->t);
     $userAuthSalt = $this->db->escapeStr($this->config->userAuthSalt);
 
     $role = $this->roles->get($this->userRole);
 
     $select = 'p.id, e.data AS email, p.modified FROM pages AS p';
-    $joinEmail = 'field_email e ON (p.id = e.pages_id)';
+    $joinEmail = "field_{$emailField} e ON (p.id = e.pages_id)";
     $joinRole = 'field_roles r ON (p.id = r.pages_id)';
     $where = "r.data = '{$role->id}'";
-
     $addWhere = "sha1(CONCAT(e.data, p.id, '$userAuthSalt')) = '$token'";
-    $addWhere .= ' && p.status = ' . Page::statusHidden;
+    $addWhere .= ' && p.status = ' . $status;
 
     return $this->db->query("SELECT $select LEFT JOIN $joinEmail LEFT JOIN $joinRole WHERE $where && $addWhere");
   }

@@ -70,7 +70,6 @@ class FeUserConfig extends ModuleConfig {
     $field->label = __('User Role');
     $field->attr('name', 'userRole');
     $field->columnWidth = 50;
-    $field->required = true;
     foreach ($this->getAvailableRoles() as $role) $field->addOption($role, $role);
     $inputfields->add($field);
 
@@ -78,7 +77,6 @@ class FeUserConfig extends ModuleConfig {
     $field->label = __('Profile Fields');
     $field->attr('name', 'profileFields');
     $field->columnWidth = 50;
-    $field->required = true;
     foreach ($this->fields as $f) $field->addOption($f->name, $f->name);
     $inputfields->add($field);
 

@@ -568,7 +568,14 @@ class FeUser extends Process implements Module {
   }
 
   private function redirectUserIfIsLoggedin($redirectTo = null) {
-    if ($this->user->isLoggedin()) $this->session->redirect($this->getRedirectTo($redirectTo));
+    if ($this->user->isLoggedin()) {
+      $redirectToUrl = $this->getRedirectTo($redirectTo);
+
+      // prevent redirect loop
+      if ($this->page->url !== $redirectToUrl) {
+        $this->session->redirect($this->getRedirectTo($redirectTo));
+      }
+    }
   }
 
 }

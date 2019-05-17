@@ -7,9 +7,9 @@
 * See README.md for usage instructions.
 *
 * @author Tabea David <td@kf-interactive.com>
-* @version 0.0.3
-* @copyright Copyright (c) 2017
-* @see https://github.com/justonestep/processwire-feuser
+* @version 0.0.4
+* @copyright Copyright (c) 2019
+* @see https://github.com/justb3a/processwire-feuser
 * @see http://www.processwire.com
 */
 
@@ -29,8 +29,8 @@ class FeUser extends Process implements Module {
     return array(
       'title' => 'FE User Handling',
       'summary' => 'Basic FE User Handling e.g. Login, Register, Password Forgot, Logout.',
-      'version' => 003,
-      'href' => 'https://github.com/justonestep/processwire-feuser',
+      'version' => 004,
+      'href' => 'https://github.com/justb3a/processwire-feuser',
       'icon' => 'user',
       'permission' => 'page-view',
       'autoload' => true,
@@ -80,9 +80,18 @@ class FeUser extends Process implements Module {
         $this->session->redirect($this->pages->get('/')->url . '?forgot=1&force=1');
       }
 
-      if ($this->session->login($username, $pass)) {
-        // login successful
-        $this->session->redirect($this->getRedirectTo($redirectTo));
+      // login with the given name and password
+      try {
+        $user = $this->session->login($username, $pass);
+        if ($user && $user->id) {
+          // login successful
+          $this->session->redirect($this->getRedirectTo($redirectTo));
+        } else {
+          $this->session->error = __('Login failed. Please try again.');
+        }
+      } catch (WireException $e) {
+        // in case of multiple false login
+        $this->session->error = $e->getMessage();
       }
     }
   }
